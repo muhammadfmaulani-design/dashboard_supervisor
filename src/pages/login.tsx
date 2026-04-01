@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react'; // Tambahkan useEffect
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../utils/supabase';
 import { LogIn, ShieldCheck, Loader2 } from 'lucide-react';
@@ -9,6 +9,20 @@ const LoginPage = () => {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // --- LOGIKA CEK SESSION (Auto Login) ---
+  useEffect(() => {
+    const checkExistingSession = () => {
+      const sessionString = localStorage.getItem('user_session');
+      if (sessionString) {
+        // Jika data ada di localStorage, langsung lempar ke dashboard
+        // Gunakan replace: true agar user tidak bisa kembali ke login pakai tombol back browser
+        navigate('/dashboard', { replace: true });
+      }
+    };
+
+    checkExistingSession();
+  }, [navigate]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -37,7 +51,7 @@ const LoginPage = () => {
         throw new Error('Akses ditolak. Khusus Supervisor atau Admin.');
       }
 
-      // 2. Login resmi ke Supabase Auth (Agar RLS terbuka untuk narik data FTW dll)
+      // 2. Login resmi ke Supabase Auth
       const { error: authError } = await supabase.auth.signInWithPassword({
         email: userData.email,
         password: password,
@@ -50,7 +64,7 @@ const LoginPage = () => {
         throw authError;
       }
 
-      // 3. Simpan data sesi ke localStorage untuk UI Dashboard
+      // 3. Simpan data sesi ke localStorage (Inilah yang "mengingat" user)
       const sessionData = {
         badge_number: userData.badge_number,
         nama: userData.nama,
@@ -120,7 +134,14 @@ const LoginPage = () => {
             disabled={loading || !badgeNumber || !password}
             className="w-full mt-2 bg-red-600 hover:bg-red-700 text-white font-bold py-4 rounded-2xl shadow-lg shadow-red-100 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
           >
-            {loading ? <Loader2 className="animate-spin" size={20} /> : <><LogIn size={20} /> MASUK</>}
+            {loading ? (
+              <div className="flex items-center gap-2">
+                <Loader2 className="animate-spin" size={20} />
+                <span>Memeriksa...</span>
+              </div>
+            ) : (
+              <><LogIn size={20} /> MASUK</>
+            )}
           </button>
         </form>
       </div>
