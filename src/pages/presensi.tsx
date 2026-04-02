@@ -1,7 +1,7 @@
-import { useState, useEffect } from 'react';
+import { CheckCircle2, Edit, Edit3, Loader2, Lock, Save, User as UserIcon, X } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom'; // IMPORT INI DITAMBAHKAN
 import { supabase } from '../utils/supabase';
-import { CheckCircle2, Loader2, Save, User as UserIcon, Lock, Edit, X, Edit3 } from 'lucide-react';
 
 interface Supervisor {
   group: string;
@@ -71,9 +71,12 @@ const PresensiPage = ({ supervisor }: { supervisor: Supervisor }) => {
       
       let defaultDateStr = "";
 
+      // Di dalam fungsi initData
       for (let i = -3; i <= 3; i++) {
         const d = new Date(dNow);
         d.setDate(d.getDate() + i);
+        
+        // Standarisasi string tanggal (YYYY-MM-DD)
         const tzOffset = d.getTimezoneOffset() * 60000;
         const tglStr = new Date(d.getTime() - tzOffset).toISOString().split('T')[0];
         
@@ -84,7 +87,7 @@ const PresensiPage = ({ supervisor }: { supervisor: Supervisor }) => {
           tanggal: tglStr,
           hari: namaHariArr[d.getDay()],
           is_today: isToday,
-          is_locked: i < -2 
+          is_locked: i < -2 || i > 0 
         });
       }
       
