@@ -1,6 +1,6 @@
-import { CheckCircle2, Edit, Edit3, Loader2, Lock, Save, User as UserIcon, X } from 'lucide-react';
+import { CheckCircle2, Edit, Edit3, Loader2, Lock, Save, User as UserIcon, X, Trash2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { useLocation } from 'react-router-dom'; // IMPORT INI DITAMBAHKAN
+import { useLocation } from 'react-router-dom';
 import { supabase } from '../utils/supabase';
 
 interface Supervisor {
@@ -26,7 +26,7 @@ interface Karyawan {
 }
 
 const PresensiPage = ({ supervisor }: { supervisor: Supervisor }) => {
-  const location = useLocation(); // MENANGKAP STATE DARI HALAMAN SEBELUMNYA
+  const location = useLocation();
 
   const [isLoadingInit, setIsLoadingInit] = useState<boolean>(true);
   const [isLoadingHarian, setIsLoadingHarian] = useState<boolean>(false);
@@ -41,8 +41,9 @@ const PresensiPage = ({ supervisor }: { supervisor: Supervisor }) => {
   const [pertanyaanFTW, setPertanyaanFTW] = useState<any[]>([]);
 
   const [unsavedData, setUnsavedData] = useState<Record<string, any>>({});
-  const [isEditMode, setIsEditMode] = useState<boolean>(false);
+  const [pendingDeletions, setPendingDeletions] = useState<string[]>([]); // ANTREAN HAPUS
 
+  const [isEditMode, setIsEditMode] = useState<boolean>(false);
   const [ftwModalOpen, setFtwModalOpen] = useState<boolean>(false);
   const [activeKaryawan, setActiveKaryawan] = useState<Karyawan | null>(null);
   const [ftwAnswers, setFtwAnswers] = useState<Record<string, boolean>>({});
@@ -71,12 +72,10 @@ const PresensiPage = ({ supervisor }: { supervisor: Supervisor }) => {
       
       let defaultDateStr = "";
 
-      // Di dalam fungsi initData
       for (let i = -3; i <= 3; i++) {
         const d = new Date(dNow);
         d.setDate(d.getDate() + i);
         
-        // Standarisasi string tanggal (YYYY-MM-DD)
         const tzOffset = d.getTimezoneOffset() * 60000;
         const tglStr = new Date(d.getTime() - tzOffset).toISOString().split('T')[0];
         
@@ -93,7 +92,6 @@ const PresensiPage = ({ supervisor }: { supervisor: Supervisor }) => {
       
       setKalenderMingguan(tempKalender);
 
-      // PERBAIKAN: Gunakan tanggal dari location.state jika ada (lemparan dari oper presensi)
       const targetDate = location.state?.targetDate || defaultDateStr;
       setSelectedDate(targetDate);
       setIsSelectedLocked(tempKalender.find(k => k.tanggal === targetDate)?.is_locked || false);
@@ -108,15 +106,15 @@ const PresensiPage = ({ supervisor }: { supervisor: Supervisor }) => {
   const fetchDataHarian = async () => {
     setIsLoadingHarian(true);
     setUnsavedData({});
+    setPendingDeletions([]); // Bersihkan antrean hapus tiap ganti tanggal
     setIsEditMode(false);
 
     try {
-      // PERBAIKAN: Tarik data presensi_delegasi sekaligus untuk dijadikan draft otomatis
       const [resJadwal, resKaryawan, resPresensi, resDelegasi] = await Promise.all([
         supabase.from('kalender_shift').select('shift_code').eq('group_id', supervisor.group).eq('shift_date', selectedDate).maybeSingle(),
         supabase.from('karyawan').select('*').eq('kode_shift', supervisor.group).in('role', ['EMP', 'SPV']),
         supabase.from('presensi').select('*').eq('tanggal_shift', selectedDate),
-        supabase.from('presensi_delegasi').select('*').eq('tanggal_shift', selectedDate) // TARIK DRAFT FTW
+        supabase.from('presensi_delegasi').select('*').eq('tanggal_shift', selectedDate)
       ]);
 
       const currentShift = resJadwal.data?.shift_code || "OFF";
@@ -137,7 +135,6 @@ const PresensiPage = ({ supervisor }: { supervisor: Supervisor }) => {
         const isAbsen = !!pData;
         const isDelegated = !!dData && !isAbsen;
 
-        // PERBAIKAN: Jika ada di tabel delegasi tapi belum di presensi final, masukkan ke unsavedData otomatis
         if (isDelegated) {
           drafts[badge] = {
             badge_number: badge,
@@ -145,7 +142,7 @@ const PresensiPage = ({ supervisor }: { supervisor: Supervisor }) => {
             tanggal_shift: selectedDate,
             shift_aktual: currentShift,
             status_kehadiran: "Hadir",
-            data_ftw: dData.data_ftw || {}, // Memasukkan jawaban FTW dari Man Power
+            data_ftw: dData.data_ftw || {},
           };
         }
 
@@ -206,59 +203,103 @@ const PresensiPage = ({ supervisor }: { supervisor: Supervisor }) => {
         data_ftw: ftwAnswers,
       }
     }));
+
+    // Keluarkan dari antrean hapus jika supervisor mengabsen ulang
+    setPendingDeletions(prev => prev.filter(b => b !== badge));
     
     setFtwModalOpen(false);
   };
 
+  // LOGIKA BARU: Antrean Hapus (Tidak memicu database secara instan)
+  const batalkanPresensi = (karyawan: Karyawan) => {
+    const badge = karyawan.badge_number;
+
+    // Hapus dari draft lokal jika ada
+    if (unsavedData[badge]) {
+      setUnsavedData(prev => {
+        const newData = { ...prev };
+        delete newData[badge];
+        return newData;
+      });
+    }
+
+    // Jika karyawan aslinya ada di database, masukkan ke antrean hapus
+    if (karyawan.is_absen) {
+      if (!pendingDeletions.includes(badge)) {
+        setPendingDeletions(prev => [...prev, badge]);
+      }
+    }
+  };
+
   const konfirmasiPresensi = async () => {
-    if (Object.keys(unsavedData).length === 0) return;
+    if (Object.keys(unsavedData).length === 0 && pendingDeletions.length === 0) return;
 
     setIsSubmitting(true);
     try {
       const batchData = Object.values(unsavedData);
       const isP1 = shiftCode.trim().toLowerCase() === 'p1';
 
-      const presensiPayload = batchData.map((e: any) => ({
-        badge_number: e.badge_number,
-        tanggal_shift: e.tanggal_shift,
-        shift_aktual: e.shift_aktual,
-        status_kehadiran: e.status_kehadiran,
-        data_ftw: e.data_ftw,
-        waktu_submit: new Date().toISOString(),
-      }));
-      
-      const { error: errPresensi } = await supabase.from('presensi').insert(presensiPayload);
-      if (errPresensi) throw errPresensi;
+      // 1. EKSEKUSI PENGHAPUSAN LEBIH DULU
+      if (pendingDeletions.length > 0) {
+        await supabase.from('presensi').delete().in('badge_number', pendingDeletions).eq('tanggal_shift', selectedDate);
+        if (isP1) {
+          await supabase.from('overtime').delete().in('badge_number', pendingDeletions).eq('tanggal_shift', selectedDate);
+        }
+      }
 
-      if (isP1) {
-        const overtimePayload = batchData.map((e: any) => ({
+      // 2. EKSEKUSI PENYIMPANAN / PERUBAHAN
+      if (batchData.length > 0) {
+        const presensiPayload = batchData.map((e: any) => ({
           badge_number: e.badge_number,
-          nama_karyawan: e.nama_karyawan,
           tanggal_shift: e.tanggal_shift,
           shift_aktual: e.shift_aktual,
           status_kehadiran: e.status_kehadiran,
           data_ftw: e.data_ftw,
-          jam_ot: 8,
-          is_ekstra: false,
-          spv_badge: supervisor.badge_number,
-          created_at: new Date().toISOString(),
+          waktu_submit: new Date().toISOString(),
         }));
         
-        const { error: errOvertime } = await supabase.from('overtime').insert(overtimePayload);
-        if (errOvertime) throw errOvertime;
+        const { error: errPresensi } = await supabase
+          .from('presensi')
+          .upsert(presensiPayload, { onConflict: 'badge_number,tanggal_shift' });
+          
+        if (errPresensi) throw errPresensi;
+
+        if (isP1) {
+          const overtimePayload = batchData.map((e: any) => ({
+            badge_number: e.badge_number,
+            nama_karyawan: e.nama_karyawan,
+            tanggal_shift: e.tanggal_shift,
+            shift_aktual: e.shift_aktual,
+            status_kehadiran: e.status_kehadiran,
+            data_ftw: e.data_ftw,
+            jam_ot: 8,
+            is_ekstra: false,
+            spv_badge: supervisor.badge_number,
+            created_at: new Date().toISOString(),
+          }));
+          
+          const { error: errOvertime } = await supabase
+            .from('overtime')
+            .upsert(overtimePayload, { onConflict: 'badge_number,tanggal_shift' });
+            
+          if (errOvertime) throw errOvertime;
+        }
+
+        const badgesToDelete = batchData.map((e: any) => e.badge_number);
+        await supabase
+          .from('presensi_delegasi')
+          .delete()
+          .in('badge_number', badgesToDelete)
+          .eq('tanggal_shift', selectedDate);
       }
 
-      // Opsional: Hapus draft dari presensi_delegasi setelah berhasil masuk presensi final agar tabel bersih
-      const badgesToDelete = batchData.map((e:any) => e.badge_number);
-      await supabase.from('presensi_delegasi').delete().in('badge_number', badgesToDelete).eq('tanggal_shift', selectedDate);
-
-      alert(isP1 ? "Presensi Normal & Overtime P1 Berhasil Disimpan!" : "Seluruh Presensi Berhasil Disimpan!");
+      alert("Perubahan Presensi Berhasil Disimpan!");
       
-      // Clear location state agar tidak terus me-load ulang saat refresh
-      window.history.replaceState({}, document.title)
+      window.history.replaceState({}, document.title);
       fetchDataHarian(); 
+      
     } catch (e: any) {
-      alert("Gagal menyimpan data: " + (e.message || e));
+      alert("Gagal menyimpan perubahan: " + (e.message || e));
     } finally {
       setIsSubmitting(false);
     }
@@ -266,6 +307,9 @@ const PresensiPage = ({ supervisor }: { supervisor: Supervisor }) => {
 
   const hasSavedData = anggotaTim.some((k: Karyawan) => k.is_absen === true);
   const isP1 = shiftCode.trim().toLowerCase() === 'p1';
+  
+  // Total perubahan adalah gabungan yang mau di-save + yang mau dihapus
+  const totalPerubahan = Object.keys(unsavedData).length + pendingDeletions.length;
 
   if (isLoadingInit) {
     return (
@@ -327,7 +371,9 @@ const PresensiPage = ({ supervisor }: { supervisor: Supervisor }) => {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 md:gap-4">
             {anggotaTim.map((k: Karyawan) => {
               const badge = k.badge_number;
-              const isAbsenServer = k.is_absen;
+              const isPendingDelete = pendingDeletions.includes(badge);
+              // Karyawan dianggap absen JIKA ada di DB DAN TIDAK dalam antrean hapus
+              const isAbsenServer = k.is_absen && !isPendingDelete;
               const isDraftLocal = !!unsavedData[badge];
 
               let actionButton;
@@ -335,16 +381,26 @@ const PresensiPage = ({ supervisor }: { supervisor: Supervisor }) => {
                 actionButton = <Lock className="text-gray-300" size={24} />;
               } else if (isDraftLocal) {
                 actionButton = (
-                  <button onClick={() => bukaDialogFTW(k)} className="px-3 py-1.5 bg-yellow-50 text-yellow-700 font-bold text-xs rounded-lg flex items-center gap-1 border border-yellow-200">
-                    <Edit3 size={14} /> SIAP KIRIM
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => bukaDialogFTW(k)} className="px-3 py-1.5 bg-yellow-50 text-yellow-700 font-bold text-xs rounded-lg flex items-center gap-1 border border-yellow-200">
+                      <Edit3 size={14} /> SIAP KIRIM
+                    </button>
+                    <button onClick={() => batalkanPresensi(k)} className="p-1.5 bg-red-50 text-red-600 font-bold text-xs rounded-lg border border-red-200 hover:bg-red-100">
+                      <X size={16} />
+                    </button>
+                  </div>
                 );
               } else if (isAbsenServer) {
                 if (isEditMode) {
                   actionButton = (
-                    <button onClick={() => bukaDialogFTW(k)} className="px-3 py-1.5 bg-orange-50 text-orange-700 font-bold text-xs rounded-lg flex items-center gap-1 border border-orange-200">
-                      <Edit size={14} /> EDIT
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button onClick={() => bukaDialogFTW(k)} className="px-3 py-1.5 bg-orange-50 text-orange-700 font-bold text-xs rounded-lg flex items-center gap-1 border border-orange-200">
+                        <Edit size={14} /> EDIT
+                      </button>
+                      <button onClick={() => batalkanPresensi(k)} className="px-3 py-1.5 bg-red-50 text-red-700 font-bold text-xs rounded-lg flex items-center gap-1 border border-red-200 hover:bg-red-100" title="Hapus Data Absen">
+                        <Trash2 size={14} /> HAPUS
+                      </button>
+                    </div>
                   );
                 } else {
                   actionButton = <span className="text-xs font-bold text-green-600 flex items-center gap-1"><CheckCircle2 size={16} /> TERKIRIM</span>;
@@ -358,7 +414,7 @@ const PresensiPage = ({ supervisor }: { supervisor: Supervisor }) => {
               }
 
               return (
-                <div key={badge} className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm flex items-center justify-between hover:shadow-md transition-shadow">
+                <div key={badge} className={`bg-white p-4 rounded-xl border ${isPendingDelete ? 'border-red-200 opacity-60' : 'border-gray-200'} shadow-sm flex items-center justify-between hover:shadow-md transition-all`}>
                   <div className="flex items-center gap-3">
                     <div className={`p-2 rounded-full ${isAbsenServer || isDraftLocal ? 'bg-green-100 text-green-600' : 'bg-red-50 text-red-300'}`}>
                       {isAbsenServer || isDraftLocal ? <CheckCircle2 size={24} /> : <UserIcon size={24} />}
@@ -381,19 +437,34 @@ const PresensiPage = ({ supervisor }: { supervisor: Supervisor }) => {
           <div className="max-w-7xl mx-auto p-4 flex justify-end">
             {isSubmitting ? (
               <div className="w-full flex justify-center p-3"><Loader2 className="animate-spin text-red-600" size={30} /></div>
-            ) : Object.keys(unsavedData).length > 0 ? (
-              <button onClick={konfirmasiPresensi} className={`w-full md:w-auto px-8 py-3.5 rounded-xl font-bold text-white flex items-center justify-center gap-2 shadow-lg transition-colors ${isP1 ? 'bg-yellow-500 hover:bg-yellow-600 text-red-900' : 'bg-red-600 hover:bg-red-700'}`}>
-                <Save size={20} /> KONFIRMASI {Object.keys(unsavedData).length} PRESENSI {isP1 ? '& P1' : ''}
-              </button>
-            ) : hasSavedData && !isEditMode ? (
-              <button onClick={() => setIsEditMode(true)} className="w-full md:w-auto px-8 py-3.5 rounded-xl font-bold text-orange-600 bg-white border-2 border-orange-600 flex items-center justify-center gap-2 hover:bg-orange-50">
-                <Lock className="rotate-12" size={20} /> EDIT PRESENSI
-              </button>
-            ) : isEditMode && Object.keys(unsavedData).length === 0 ? (
-              <button onClick={() => setIsEditMode(false)} className="w-full md:w-auto px-8 py-3.5 rounded-xl font-bold text-gray-500 bg-white flex items-center justify-center gap-2 hover:bg-gray-50">
-                <X size={20} /> BATAL EDIT
-              </button>
-            ) : null}
+            ) : (
+              <div className="flex w-full md:w-auto gap-3">
+                {isEditMode && (
+                  <button 
+                    onClick={() => fetchDataHarian()} 
+                    className="flex-1 md:flex-none px-6 py-3.5 rounded-xl font-bold text-gray-500 bg-gray-100 flex items-center justify-center gap-2 hover:bg-gray-200 transition-colors"
+                  >
+                    <X size={20} /> BATAL
+                  </button>
+                )}
+
+                {totalPerubahan > 0 ? (
+                  <button 
+                    onClick={konfirmasiPresensi} 
+                    className={`flex-1 md:flex-none px-8 py-3.5 rounded-xl font-bold text-white flex items-center justify-center gap-2 shadow-lg transition-colors ${isP1 ? 'bg-yellow-500 hover:bg-yellow-600 text-red-900' : 'bg-red-600 hover:bg-red-700'}`}
+                  >
+                    <Save size={20} /> SIMPAN {totalPerubahan} PERUBAHAN
+                  </button>
+                ) : (!isEditMode && hasSavedData) ? (
+                  <button 
+                    onClick={() => setIsEditMode(true)} 
+                    className="flex-1 md:flex-none px-8 py-3.5 rounded-xl font-bold text-orange-600 bg-white border-2 border-orange-600 flex items-center justify-center gap-2 hover:bg-orange-50"
+                  >
+                    <Lock className="rotate-12" size={20} /> EDIT PRESENSI
+                  </button>
+                ) : null}
+              </div>
+            )}
           </div>
         </div>
       )}

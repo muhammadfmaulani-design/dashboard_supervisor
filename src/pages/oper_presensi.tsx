@@ -11,7 +11,8 @@ import {
   Hourglass, 
   CloudDownload, 
   FileCheck2,
-  Loader2
+  Loader2,
+  Lock
 } from 'lucide-react';
 
 interface Supervisor {
@@ -57,7 +58,7 @@ const OperPresensiPage = ({ supervisor }: { supervisor: Supervisor }) => {
       });
     }
     setKalenderDelegasi(tempKalender);
-    setSelectedDate(tempKalender[0].tanggal); // Set default ke hari ini
+    setSelectedDate(tempKalender[0].tanggal); 
   }, []);
 
   // 2. FETCH DATA KETIKA TANGGAL BERUBAH
@@ -65,13 +66,11 @@ const OperPresensiPage = ({ supervisor }: { supervisor: Supervisor }) => {
     if (selectedDate) {
       fetchStatusDelegasi();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedDate]);
 
   const fetchStatusDelegasi = async () => {
     setIsLoading(true);
     try {
-      // Cek Shift untuk tanggal yang dipilih
       const { data: jadwal } = await supabase
         .from('kalender_shift')
         .select('shift_code')
@@ -79,10 +78,10 @@ const OperPresensiPage = ({ supervisor }: { supervisor: Supervisor }) => {
         .eq('shift_date', selectedDate)
         .maybeSingle();
 
-      const currentShift = jadwal?.shift_code || "OFF";
+      // Jika jadwal tidak ada, set jadi "O" (OFF)
+      const currentShift = jadwal?.shift_code || "O";
       setShiftCode(currentShift);
 
-      // Tarik data Karyawan, Presensi Final, DAN Presensi Delegasi
       const [resKaryawan, resPresensi, resDelegasi] = await Promise.all([
         supabase.from('karyawan').select('*').eq('kode_shift', supervisor.group).in('role', ['EMP', 'SPV']),
         supabase.from('presensi').select('badge_number').eq('tanggal_shift', selectedDate),
@@ -132,6 +131,13 @@ const OperPresensiPage = ({ supervisor }: { supervisor: Supervisor }) => {
     });
   };
 
+  const tzOffset = new Date().getTimezoneOffset() * 60000;
+  const todayStr = new Date(Date.now() - tzOffset).toISOString().split('T')[0];
+  const isFutureDate = selectedDate > todayStr; 
+  
+  // KUNCI MATI DI SINI: STRICT CEK HURUF "O"
+  const isShiftOff = shiftCode.trim().toUpperCase() === "O";
+
   const delegatedList = anggotaTim.filter(k => k.is_delegated);
   const isAllConfirmed = confirmedCount === totalEmp && totalEmp > 0;
   const isSomeDelegated = delegatedCount > 0;
@@ -158,7 +164,6 @@ const OperPresensiPage = ({ supervisor }: { supervisor: Supervisor }) => {
           </p>
         </div>
 
-        {/* KALENDER HORIZONTAL KHUSUS OPER PRESENSI (1 MINGGU KE DEPAN) */}
         <div>
           <p className="text-sm font-bold text-gray-500 mb-2">Pilih Tanggal Delegasi:</p>
           <div className="bg-white border border-gray-200 overflow-x-auto whitespace-nowrap p-3 flex gap-2 rounded-xl shadow-sm">
@@ -184,9 +189,8 @@ const OperPresensiPage = ({ supervisor }: { supervisor: Supervisor }) => {
           </div>
         </div>
 
-        {/* INDIKATOR SHIFT */}
         <div className="flex justify-center">
-          <div className={`px-4 py-1.5 rounded-full text-sm font-bold border ${shiftCode === "OFF" ? "bg-red-50 text-red-600 border-red-200" : "bg-blue-50 text-blue-800 border-blue-200"}`}>
+          <div className={`px-4 py-1.5 rounded-full text-sm font-bold border ${isShiftOff ? "bg-red-50 text-red-600 border-red-200" : "bg-blue-50 text-blue-800 border-blue-200"}`}>
             SHIFT TERPILIH: {shiftCode}
           </div>
         </div>
@@ -196,20 +200,23 @@ const OperPresensiPage = ({ supervisor }: { supervisor: Supervisor }) => {
             <Loader2 className="animate-spin mb-2 text-blue-600" size={32} />
             <p className="text-sm font-medium">Memuat Status...</p>
           </div>
-        ) : (shiftCode === "OFF" || shiftCode === "O") ? (
+        ) : isShiftOff ? (
           <div className="bg-orange-50 border border-orange-200 p-6 rounded-xl flex flex-col items-center text-center shadow-sm">
             <CalendarOff size={40} className="text-orange-400 mb-3" />
             <p className="font-bold text-lg text-gray-800">Grup Sedang OFF / Libur</p>
-            <p className="text-sm text-gray-500 mt-1">Tidak ada presensi yang perlu didelegasikan di hari libur.</p>
+            <p className="text-sm text-gray-500 mt-1">Tidak ada presensi yang perlu didelegasikan karena shift adalah "O".</p>
           </div>
         ) : (
           <div className="space-y-6 animate-in fade-in">
-            <div>
-              <p className="text-sm font-bold text-gray-500 mb-2">Link Akses Web Presensi:</p>
-              <button onClick={salinLink} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-xl shadow-md transition-colors flex justify-center items-center gap-2 active:scale-[0.98]">
-                <Copy size={20} /> SALIN LINK & BAGIKAN KE WA
-              </button>
-            </div>
+            
+            {!isAllConfirmed && (
+              <div>
+                <p className="text-sm font-bold text-gray-500 mb-2">Link Akses Web Presensi:</p>
+                <button onClick={salinLink} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-xl shadow-md transition-colors flex justify-center items-center gap-2 active:scale-[0.98]">
+                  <Copy size={20} /> SALIN LINK & BAGIKAN KE WA
+                </button>
+              </div>
+            )}
 
             <div className={`p-6 rounded-xl border flex flex-col items-center shadow-sm transition-colors ${cardColor} ${borderColor}`}>
               {isAllConfirmed ? <CheckCircle2 size={40} className={iconColor} /> : isSomeDelegated ? <FileClock size={40} className={iconColor} /> : <Hourglass size={40} className={iconColor} />}
@@ -233,12 +240,18 @@ const OperPresensiPage = ({ supervisor }: { supervisor: Supervisor }) => {
                   ))}
                 </div>
 
-                <button 
-                  onClick={() => navigate('/dashboard/presensi', { state: { targetDate: selectedDate } })}
-                  className="w-full mt-6 bg-orange-600 hover:bg-orange-700 text-white font-bold py-4 rounded-xl shadow-md transition-colors flex justify-center items-center gap-2 active:scale-[0.98]"
-                >
-                  <FileCheck2 size={20} /> REVIEW & KONFIRMASI
-                </button>
+                {isFutureDate ? (
+                  <div className="w-full mt-6 bg-gray-100 border-2 border-gray-200 text-gray-400 font-bold py-4 rounded-xl flex justify-center items-center gap-2 cursor-not-allowed">
+                    <Lock size={20} /> KONFIRMASI DIKUNCI HINGGA HARI-H
+                  </div>
+                ) : (
+                  <button 
+                    onClick={() => navigate('/dashboard/presensi', { state: { targetDate: selectedDate } })}
+                    className="w-full mt-6 bg-orange-600 hover:bg-orange-700 text-white font-bold py-4 rounded-xl shadow-md transition-colors flex justify-center items-center gap-2 active:scale-[0.98]"
+                  >
+                    <FileCheck2 size={20} /> REVIEW & KONFIRMASI
+                  </button>
+                )}
               </div>
             )}
           </div>
